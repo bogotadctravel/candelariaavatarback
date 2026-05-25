@@ -36,7 +36,6 @@ tools = [search_in_visitbogota, search_in_events, create_web_rag_tool, persona_a
 # ----------------------- AGENTE -----------------------
 class CustomAgentState(AgentState):
     user_id: str
-    client_source: str
     preferences: dict
 
 
@@ -112,14 +111,9 @@ def chat_with_agent(user_id: str, message: str):
         {
           "messages": [{"role": "user", "content": message}],
           "user_id": user_id,  
-          "client_source": "chat_web",
           "preferences": {"theme": "dark"} 
         },
-        {
-            "configurable": {"thread_id": user_id, "client_source": "chat_web"},
-            "metadata": {"user_id": user_id, "client_source": "chat_web"},
-            "tags": ["chat_web"],
-        },
+        {"configurable": {"thread_id": user_id}},
     )
     
     return result["messages"][-1].content
@@ -130,21 +124,15 @@ def chat_with_agent(user_id: str, message: str):
 # Estado del grafo
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    user_id: str
-    client_source: str
 
 # Crear el grafo
-def create_workflow(user_id: str, user_name: str = '', lang: str = 'es', client_source: str = 'avatarCDT' )-> StateGraph:
+def create_workflow(user_id: str, user_name: str = '',lang: str = 'es' )-> StateGraph:
     # Define the graph
     # Tu nodo usando el agente
-    print(f"User_ID>{user_id}")
-    print(f"user_name>{user_name}")
-    print(f"lang>{lang}")
-
     def agent_node(state: State):
-        print("imprimiendo estado")
-        print(state)
-        print("imprimiendo end estado")
+        #print("imprimiendo estado")
+        #print(state)
+        #print("imprimiendo end estado")
         last_human = next(
             (msg for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)),
             None
@@ -165,37 +153,19 @@ def create_workflow(user_id: str, user_name: str = '', lang: str = 'es', client_
         
         if last_human:
             query = f"{last_human.content}\n\n{txt_lang}"
-        print(f" segundo: ")
+
         print(f" Query: {query}")
-
-        state_user_id = state.get("user_id", user_id)
-        state_client_source = state.get("client_source", client_source)
-
-        print(f"User_ID>{state_user_id}")
-        print(f"user_name>{user_name}")
-        print(f"lang>{lang}")
-        print(f"client_source>{state_client_source}")
         result = agente.invoke(
             {
               "messages": [{"role": "user", "content": query}],
-              "user_id": state_user_id,
-              "client_source": state_client_source,
+              "user_id": user_id,  
               "preferences": {"theme": "dark"} 
             },
-            {
-                "configurable": {"thread_id": state_user_id, "client_source": state_client_source},
-                "metadata": {"user_id": state_user_id, "client_source": state_client_source},
-                "tags": [state_client_source],
-            },
+            {"configurable": {"thread_id": user_id}},
         )
         
-        return {
-            "messages": result["messages"],
-            "user_id": state_user_id,
-            "client_source": state_client_source,
-        }
+        return {"messages": result["messages"]}
 
-    print(f" primero: ")
     workflow = StateGraph(State)
     workflow.add_node("agent", agent_node)
     workflow.add_edge(START, "agent")

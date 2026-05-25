@@ -2,6 +2,7 @@ from fastapi import FastAPI, Body, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from datetime import datetime, timezone
 from typing import List, Optional
 from modules.mainAgent import chat_with_agent
 from rag.web_rag import vectorizar_urls
@@ -40,6 +41,139 @@ class ItemsRequest(BaseModel):
 class ConversationRequest(BaseModel):
     user_id: str
     limit: Optional[int] = 50 
+
+
+def _load_checkpoint_value(r: redis.Redis, key: str) -> dict:
+    key_type = r.type(key)
+
+    if key_type == "ReJSON-RL":
+        raw_data = r.json().get(key)
+    else:
+        raw_data = r.get(key)
+
+    if not raw_data:
+        return {}
+
+    if isinstance(raw_data, dict):
+        return raw_data
+
+    if isinstance(raw_data, str):
+        try:
+            return json.loads(raw_data)
+        except json.JSONDecodeError:
+            return {}
+
+    return {}
+
+
+def _find_nested_string(data, field_name: str) -> str:
+    if isinstance(data, dict):
+        value = data.get(field_name)
+        if isinstance(value, str) and value:
+            return value
+
+        for item in data.values():
+            found = _find_nested_string(item, field_name)
+            if found:
+                return found
+
+    if isinstance(data, list):
+        for item in data:
+            found = _find_nested_string(item, field_name)
+            if found:
+                return found
+
+    return ""
+
+
+def _extract_thread_id(checkpoint: dict) -> str:
+    configurable = checkpoint.get("configurable", {})
+    if isinstance(configurable, dict) and configurable.get("thread_id"):
+        return configurable.get("thread_id")
+
+    nested_checkpoint = checkpoint.get("checkpoint", {})
+    if isinstance(nested_checkpoint, dict):
+        nested_configurable = nested_checkpoint.get("configurable", {})
+        if isinstance(nested_configurable, dict) and nested_configurable.get("thread_id"):
+            return nested_configurable.get("thread_id")
+
+    return ""
+
+
+def _extract_client_source(checkpoint: dict) -> str:
+    for field in ("client_source",):
+        found = _find_nested_string(checkpoint, field)
+        if found:
+            return found
+
+    return "unknown"
+
+
+def _extract_checkpoint_ts(checkpoint: dict) -> str:
+    ts = checkpoint.get("ts")
+    if isinstance(ts, str) and ts:
+        return ts
+
+    nested_checkpoint = checkpoint.get("checkpoint", {})
+    if isinstance(nested_checkpoint, dict):
+        nested_ts = nested_checkpoint.get("ts")
+        if isinstance(nested_ts, str) and nested_ts:
+            return nested_ts
+
+    return "unknown"
+
+
+def _parse_datetime_filter(value: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    if not value:
+        return None
+
+    try:
+        if len(value) == 10 and value.count("-") == 2:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+            if end_of_day:
+                return parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+            return parsed
+
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _parse_checkpoint_ts(value: str) -> Optional[datetime]:
+    if not value or value == "unknown":
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _extract_messages(checkpoint: dict) -> list:
+    channel_values = checkpoint.get("channel_values", {})
+    if isinstance(channel_values, dict) and isinstance(channel_values.get("messages"), list):
+        return channel_values.get("messages", [])
+
+    nested_checkpoint = checkpoint.get("checkpoint", {})
+    if isinstance(nested_checkpoint, dict):
+        nested_channel_values = nested_checkpoint.get("channel_values", {})
+        if isinstance(nested_channel_values, dict) and isinstance(nested_channel_values.get("messages"), list):
+            return nested_channel_values.get("messages", [])
+
+    return []
+
+
+def _checkpoint_sort_key(item):
+    checkpoint, key = item
+    ts = checkpoint.get("ts") or checkpoint.get("checkpoint", {}).get("ts") or ""
+    checkpoint_id = checkpoint.get("id") or checkpoint.get("checkpoint", {}).get("id") or ""
+    return (ts, checkpoint_id, str(key))
 
 #AUTH METHODS  
 
@@ -87,7 +221,7 @@ def create_user(user: User, db: Session = Depends(get_db),current_user: User = D
 
 @app.post("/chat")
 async def chat(user_id: str = Body(...), prompt: str = Body(...)):
-    respuesta = chat_with_agent(user_id,prompt)
+    respuesta = chat_with_agent(user_id, prompt)
     return {"respuesta": respuesta}
 
 
@@ -129,10 +263,10 @@ async def get_conversation(request: ConversationRequest,current_user: User = Dep
         redis_url = os.getenv("URL_REDIS")
         r = redis.Redis.from_url(redis_url, decode_responses=True)
         
-        # Buscar todas las claves de checkpoint para este usuario
-        # El formato es: checkpoint:{user_id}:__empty__:{uuid}
-        pattern = f"checkpoint:{user_id}:__empty__:*"
-        keys = r.keys(pattern)
+        # Buscar checkpoints de LangGraph y filtrar por thread_id
+        keys = r.keys("langgraph:checkpoints:*")
+        if not keys:
+            keys = r.keys("checkpoint:*:__empty__:*")
         
         if not keys:
             return JSONResponse(
@@ -144,28 +278,30 @@ async def get_conversation(request: ConversationRequest,current_user: User = Dep
                 }
             )
         
-        # Tomar la clave más reciente (la última en la lista)
-        key = keys[-1]
-        
-        # Obtener los datos - manejar tipo ReJSON-RL
-        key_type = r.type(key)
-        
-        if key_type == "ReJSON-RL":
-            # Para RedisJSON, usar json().get()
-            raw_data = r.json().get(key)
-            checkpoint = raw_data if raw_data else {}
-        else:
-            # Para strings normales
-            raw_data = r.get(key)
-            checkpoint = json.loads(raw_data) if raw_data else {}
-        
-        # La estructura real es: checkpoint['checkpoint']['channel_values']['messages']
-        checkpoint_data = checkpoint.get("checkpoint", {})
-        if isinstance(checkpoint_data, dict):
-            channel_values = checkpoint_data.get("channel_values", {})
-        else:
-            channel_values = {}
-        messages = channel_values.get("messages", [])
+        checkpoints = []
+        for key in keys:
+            checkpoint = _load_checkpoint_value(r, key)
+            if not checkpoint:
+                continue
+
+            checkpoint_thread_id = _extract_thread_id(checkpoint)
+            if checkpoint_thread_id == user_id or f":{user_id}:" in str(key):
+                checkpoints.append((checkpoint, key))
+
+        if not checkpoints:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "status": "error",
+                    "message": f"No se encontró conversación para el usuario: {user_id}",
+                    "conversation": []
+                }
+            )
+
+        checkpoint, key = max(checkpoints, key=_checkpoint_sort_key)
+        messages = _extract_messages(checkpoint)
+        client_source = _extract_client_source(checkpoint)
+        conversation_ts = _extract_checkpoint_ts(checkpoint)
         
         # Formatear los mensajes
         formatted_messages = []
@@ -239,6 +375,8 @@ async def get_conversation(request: ConversationRequest,current_user: User = Dep
         return {
             "status": "success",
             "user_id": user_id,
+            "client_source": client_source,
+            "conversation_ts": conversation_ts,
             "total_messages": len(messages),
             "returned_messages": len(formatted_messages),
             "conversation": formatted_messages
@@ -256,38 +394,113 @@ async def get_conversation(request: ConversationRequest,current_user: User = Dep
 
 
 @app.post("/conversations/list")
-async def list_conversations(current_user: User = Depends(get_current_user)):
+async def list_conversations(
+    fecha_desde: Optional[str] = Body(default=None, embed=True),
+    fecha_hasta: Optional[str] = Body(default=None, embed=True),
+    client_source_filter: Optional[str] = Body(default=None, embed=True),
+    current_user: User = Depends(get_current_user)
+):
     """
-    Lista todos los usuarios que tienen conversaciones almacenadas.
+    Lista todas las conversaciones almacenadas con user_id y client_source.
     
     Returns:
-        Lista de user_ids con conversaciones
+        Lista de conversaciones con user_id y client_source
     """
     try:
         redis_url = os.getenv("URL_REDIS")
         r = redis.Redis.from_url(redis_url, decode_responses=True)
         
-        # Buscar todas las claves de checkpoints
-        # El formato es: checkpoint:{user_id}:__empty__:{uuid}
-        keys = r.keys("checkpoint:*:__empty__:*")
-        
-        # Extraer los user_ids únicos
-        user_ids = set()
+        # Buscar checkpoints de LangGraph y mantener fallback al formato antiguo
+        keys = r.keys("langgraph:checkpoints:*")
+        if not keys:
+            keys = r.keys("checkpoint:*:__empty__:*")
+
+        conversations_by_pair = {}
         for key in keys:
             # Convertir bytes a string si es necesario
             if isinstance(key, bytes):
                 key = key.decode('utf-8')
-            
-            # Extraer el user_id del formato: checkpoint:{user_id}:__empty__:{uuid}
-            parts = key.split(':')
-            if len(parts) >= 2:
-                user_id = parts[1]
-                user_ids.add(user_id)
+
+            checkpoint = _load_checkpoint_value(r, key)
+            if not checkpoint:
+                continue
+
+            user_id = _extract_thread_id(checkpoint)
+            if not user_id and ":" in key:
+                parts = key.split(':')
+                if len(parts) >= 2:
+                    user_id = parts[1]
+
+            if not user_id:
+                continue
+
+            client_source = _extract_client_source(checkpoint)
+            conversation_ts = _extract_checkpoint_ts(checkpoint)
+            pair_key = f"{user_id}:{client_source}"
+            current_item = conversations_by_pair.get(pair_key)
+            candidate = {
+                "user_id": user_id,
+                "client_source": client_source,
+                "conversation_ts": conversation_ts,
+                "key": key,
+                "checkpoint": checkpoint,
+            }
+
+            if not current_item:
+                conversations_by_pair[pair_key] = candidate
+                continue
+
+            if _checkpoint_sort_key((checkpoint, key)) > _checkpoint_sort_key((current_item.get("checkpoint", {}), current_item["key"])):
+                conversations_by_pair[pair_key] = candidate
+
+        conversations = [
+            {
+                "user_id": item["user_id"],
+                "client_source": item["client_source"],
+                "conversation_ts": item["conversation_ts"],
+            }
+            for item in sorted(
+                conversations_by_pair.values(),
+                key=lambda item: (item["user_id"], item["client_source"])
+            )
+        ]
+
+        desde_dt = _parse_datetime_filter(fecha_desde)
+        hasta_dt = _parse_datetime_filter(fecha_hasta, end_of_day=True)
+
+        if fecha_desde and not desde_dt:
+            raise HTTPException(status_code=400, detail="fecha_desde debe ser una fecha válida ISO o YYYY-MM-DD")
+
+        if fecha_hasta and not hasta_dt:
+            raise HTTPException(status_code=400, detail="fecha_hasta debe ser una fecha válida ISO o YYYY-MM-DD")
+
+        if client_source_filter:
+            conversations = [item for item in conversations if item["client_source"] == client_source_filter]
+
+        if desde_dt or hasta_dt:
+            filtered_conversations = []
+            for item in conversations:
+                ts_dt = _parse_checkpoint_ts(item["conversation_ts"])
+                if not ts_dt:
+                    continue
+
+                if desde_dt and ts_dt < desde_dt:
+                    continue
+
+                if hasta_dt and ts_dt > hasta_dt:
+                    continue
+
+                filtered_conversations.append(item)
+
+            conversations = filtered_conversations
         
         return {
             "status": "success",
-            "total_conversations": len(user_ids),
-            "users": sorted(list(user_ids))
+            "fecha_desde": fecha_desde,
+            "fecha_hasta": fecha_hasta,
+            "client_source_filter": client_source_filter,
+            "total_conversations": len(conversations),
+            "conversations": conversations,
         }
         
     except Exception as e:
@@ -298,7 +511,7 @@ async def list_conversations(current_user: User = Depends(get_current_user)):
                 "status": "error",
                 "message": f"Error al listar conversaciones: {str(e)}",
                 "traceback": traceback.format_exc(),
-                "users": []
+                "conversations": []
             }
         )
 
@@ -368,4 +581,3 @@ async def redis_debug(current_user: User = Depends(get_current_user)):
                 "traceback": traceback.format_exc()
             }
         )
-

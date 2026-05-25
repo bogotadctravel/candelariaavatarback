@@ -6,10 +6,10 @@ from dotenv import load_dotenv
 # Carga las variables del archivo .env al inicio de la aplicación
 load_dotenv()
 # Accede a las variables de entorno
-OPENAI_KEY = os.getenv("OPENAI_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Initialize your LLM
-model = ChatOpenAI(api_key=OPENAI_KEY,model="gpt-4o-mini", temperature=0.5,max_tokens=1000,timeout=30)
+model = ChatOpenAI(api_key=OPENAI_API_KEY,model="gpt-4o-mini", temperature=0.5,max_tokens=1000,timeout=30)
 
 # Create the agent
 agent = create_agent(

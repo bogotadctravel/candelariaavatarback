@@ -14,7 +14,7 @@ load_dotenv()
 # Accede a las variables de entorno
 PATH_VECTOR_DB = os.getenv("PATH_VECTOR_DB")
 # Accede a las variables de entorno
-OPENAI_KEY = os.getenv("OPENAI_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
 def scrape_url(url: str) -> str:
@@ -51,7 +51,7 @@ def scrape_to_documents(urls: list[str]):
 def vectorizar_urls(urls: list[str]):
     index_path = f"{PATH_VECTOR_DB}/web_index"
     docs = scrape_to_documents(urls)
-    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_KEY)
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
     vectordb = FAISS.from_documents(docs, embeddings)
     vectordb.save_local(index_path)
     return f"Index web guardado en: {index_path}"
@@ -174,7 +174,7 @@ def create_web_rag_tool(query: str)-> str:
     - Recuerda mencionar: "Recuerda que Bogotá es tu casa" al finalizar
     """
 
-    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_KEY)
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
     db = FAISS.load_local(f"{PATH_VECTOR_DB}/web_index", embeddings, allow_dangerous_deserialization=True)
 
     docs = db.similarity_search(query, k=10)

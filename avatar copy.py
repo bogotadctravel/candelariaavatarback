@@ -22,7 +22,7 @@ from livekit.agents import (
     MetricsCollectedEvent,
     get_job_context
 )
-from livekit.plugins import deepgram, elevenlabs, langchain, silero, noise_cancellation, openai, simli, hedra
+from livekit.plugins import deepgram, elevenlabs, langchain, silero, noise_cancellation, openai, hedra
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from PIL import Image
 import os
@@ -34,10 +34,7 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env")
 
-server = AgentServer(
-    num_idle_processes=3,
-    load_threshold=0.95,
-)
+server = AgentServer()
 
 # El VAD se carga de forma lazy (cuando se necesita) para no bloquear el inicio
 # Esto evita que el avatar tarde en iniciar mientras carga el modelo
@@ -130,7 +127,7 @@ async def my_agent(ctx: JobContext):
     if ctx.job.metadata != '' :
       print(f"Metadata: {ctx.job.metadata}")
       metadata = json.loads(ctx.job.metadata)
-      user_id = re.sub(r"\D", "", metadata["user_id"])
+      user_id = metadata["user_id"]
       user_name = metadata["user_name"]
       user_phone = metadata["user_phone"]
       lang = metadata["lang"]
@@ -197,19 +194,10 @@ async def my_agent(ctx: JobContext):
 
     job_context = get_job_context()
     avatar_identity = "static-avatar"
-    avatar_session = simli.AvatarSession(
-      simli_config=simli.SimliConfig(
-         api_key=os.getenv("SIMLI_API_KEY"),
-         face_id=os.getenv("SIMLI_FACE_ID"),  
-         emotion_id=os.getenv("SIMLI_EMOTION_ID"), #ID of the Simli face to use for your avatar. See "Face setup" for details.
-         max_idle_time=600, # 600 segundos para el cierre de simly
-         max_session_length=1800, 
-      ),
-   )
-    # avatar_session = hedra.AvatarSession(
-    #   avatar_participant_identity=avatar_identity,
-    #   avatar_id="f46a3b9d-c6a7-4baf-9593-37b80242813c",
-    # )
+    avatar_session = hedra.AvatarSession(
+      avatar_participant_identity=avatar_identity,
+      avatar_id="f46a3b9d-c6a7-4baf-9593-37b80242813c",
+    )
 
     # # Start the avatar and wait for it to join
     # await avatar.start(session, room=ctx.room)
@@ -222,7 +210,7 @@ async def my_agent(ctx: JobContext):
         room=ctx.room,
         agent=CandelariaAgent(
             instructions=get_prompt(),
-            llm=langchain.LLMAdapter(graph=create_workflow(user_id, user_name, lang, client_source="avatarCDT")),
+            llm=langchain.LLMAdapter(graph=create_workflow(user_id, user_name, lang)),
             allow_interruptions=False,
             min_consecutive_speech_delay=0.4,
             min_endpointing_delay=0.5,
@@ -235,9 +223,9 @@ async def my_agent(ctx: JobContext):
 
     # Start avatar session after room/session are connected
     await avatar_session.start(
-        session, room=ctx.room
+        session, room=job_context.room
     )
-
+        
     await session.generate_reply(
         instructions=f"Saluda al usuario y luego preséntate y ofrece tu ayuda. Cada vez que te pregunte algo y necesites consultar la respuesta dile que te de un momento para encontrar la mejor respuesta."
     )
