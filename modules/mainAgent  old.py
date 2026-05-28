@@ -23,7 +23,7 @@ load_dotenv()
 # Accede a las variables de entorno
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-print(f"OPENAI_API_KEY {OPENAI_API_KEY}")
+#print(f"OPENAI_API_KEY {OPENAI_API_KEY}")
 
 # Modelo base (puedes usar gpt-4o, gpt-3.5-turbo, etc.)
 llm = ChatOpenAI(api_key=OPENAI_API_KEY,model="gpt-4o-mini", temperature=0.5,max_tokens=330,timeout=25)
