@@ -49,4 +49,6 @@ Thumbs.db
 *.mov
 *.wmv
 
-.env
+# Python cache
+__pycache__/
+*.py[cod]
