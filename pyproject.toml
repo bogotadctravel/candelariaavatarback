@@ -1,9 +1,0 @@
-[project]
-name = "avatar-idt-lc1"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "livekit-agents[simli]~=1.4",
-]
